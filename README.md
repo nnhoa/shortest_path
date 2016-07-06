@@ -1,5 +1,6 @@
 # shortest_path
 Compute the shortest distance on the large-scale, directed, unweighted dynamic graph
+
 1. Team Name:
 	AK-Group - Deparment of Information Systems, University of Engineering and Technology, Hanoi, Vietnam.
 	
