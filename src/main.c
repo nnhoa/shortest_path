@@ -9,17 +9,11 @@ ACM SigMod Programming Contest 2016
 #include <cilk/cilk.h>
 #include <cilk/cilk_api.h>
 #include <getopt.h>
+//#include <limits.h>
 
 //#define EXEC_FILE
 #define UNSIGNED_SIZE 	4
-#define MAX_QUERY		1000000
-#define	BUCKET_SIZE		8 //24 // nodes
-#define	BUCKET_BIT		5 //bits 5->32 nodes, 6->64; so on
-#define BUCKET_INDEX  	32 // (1 << BUCKET_BIT) // 2 power of BUCKET_BIT  bit 32//64 //
-#define BUCKET_2INDEX  	64 //(1 << (BUCKET_BIT+1))
-#define BUCKET_MODULO 	31 // (BUCKET_INDEX - 1) // 31//63 // 
-#define BUCKET_DIV 	  	4294967264 //(UINT_MAX - BUCKET_MODULO) // 4294967264//4294967232// //4294967295
-#define DISPLACEMENT 	1 //num of nodes we want to move for adding
+#define MAX_QUERY		2000000
 
 //build the graph
 void build_graph(unsigned num_nodes, unsigned num_edges);
@@ -37,13 +31,13 @@ static inline int shortest_distance(unsigned src, unsigned dst);
 static inline void 	exec_queries();
 
 //graph data
-unsigned  max_edges = 20000000, max_nodes=20000000, max_2nodes;//100M nodes
+unsigned  max_edges = 80000000, max_nodes=20000000, max_2nodes;//100M nodes
 //50M nodes => needs 2x4x4x50M = 1,6G for in/out queues with CPU 4T; 50M for maps
 //50M nodes => needs 2x4x24x50M = 9,6G for in/out queues with CPU 24T; 300M for maps
 //100M nodes => needs 2x4x24x100M = 2x9.6G for in/out queues with CPU 24T; 600M for maps
 
 unsigned num_edges;				//num of edges
-unsigned num_nodes;				//num of nodes
+unsigned num_nodes, num_2nodes;				//num of nodes
 //infos for alls incoming nodes of each vertex
 unsigned *incoming_edges;		//list of incoming nodes for all vertex
 unsigned *incoming_index;			//num of incoming nodes for each vertex
@@ -61,16 +55,16 @@ unsigned *gmap; 				//global buffer for map; used for marking all travelled vert
 unsigned *gin_queue; 			//incoming queue
 unsigned *gout_queue;			//outgoing queue
 
-unsigned query_params[MAX_QUERY*2];// 0 -> query index, 1 -> src; 2 -> dst
+unsigned long query_params[MAX_QUERY*2];// 0 -> query index, 1 -> src; 2 -> dst
 unsigned num_query;
 int 	 distances[MAX_QUERY];
 
 unsigned num_threads;// number of CPU cores
 unsigned map_isize;// size of map in 4bytes
 
-char* actions;
-unsigned* src;
-unsigned* dst;
+char actions[MAX_QUERY];
+unsigned long vertices[MAX_QUERY];
+unsigned query_index[MAX_QUERY];
 unsigned num_actions = 0;
 
 //set bit at index in the array addr
@@ -102,6 +96,7 @@ int node_cmp(const void * a, const void * b)
 }
 
 //build_graph graph from ini-file
+//build_graph graph from ini-file
 void build_graph(unsigned max_nodes, unsigned max_edges)
 {
 	unsigned *src, *dst;
@@ -116,7 +111,7 @@ void build_graph(unsigned max_nodes, unsigned max_edges)
 	dst = (unsigned *)aligned_alloc(16, UNSIGNED_SIZE*max_edges);
 
 	char *line = NULL;
-	unsigned n =0, max = 0;
+	unsigned n =0, max = 0, maxin=0, maxout=0;
 	int res;
 	size_t bufsize=0;
 	
@@ -124,6 +119,7 @@ void build_graph(unsigned max_nodes, unsigned max_edges)
 	FILE *fp = stdin;
 #ifdef EXEC_FILE	
 	fp = fopen("init-file.txt", "r");	
+	//fp = fopen("soc-pokec-relationships.txt", "r");  
 #endif
 	while (1) {
 		res = getline(&line,&bufsize,fp);
@@ -144,7 +140,7 @@ void build_graph(unsigned max_nodes, unsigned max_edges)
 	}
 	//fclose(fp);
 	free(line);	
-	num_edges = n; num_nodes = max+1;
+	num_edges = n; num_nodes = max+1; num_2nodes = num_nodes << 1;
 	
 	max = 0;
 	incoming_index[0] = outgoing_index[0] = 0;
@@ -153,19 +149,21 @@ void build_graph(unsigned max_nodes, unsigned max_edges)
 	for (unsigned i = 0; i< max_nodes-1; i++){	
 		n = i<< 1;	
 		incoming_index[n+2] = incoming_index[n] + incoming_index[n+1];
-		if ((i>BUCKET_INDEX) && ((i & BUCKET_MODULO) == 0)) {
-			incoming_index[n+2] += BUCKET_SIZE;
-		}
+		// if ((i>BUCKET_INDEX) && ((i & BUCKET_MODULO) == 0)) {
+		// 	incoming_index[n+2] += BUCKET_SIZE;
+		// }
 		
 		outgoing_index[n+2] = outgoing_index[n] + outgoing_index[n+1];
-		if ((i>BUCKET_INDEX) && ((i & BUCKET_MODULO) == 0)){
-			outgoing_index[n+2] += BUCKET_SIZE ;
-		}	
+		// if ((i>BUCKET_INDEX) && ((i & BUCKET_MODULO) == 0)){
+		// 	outgoing_index[n+2] += BUCKET_SIZE ;
+		// }	
+		if (maxin < incoming_index[n+1]) maxin = incoming_index[n+1];
+		if (maxout < outgoing_index[n+1]) maxout = outgoing_index[n+1];	
 	}
 
 	//allocate buffer for edges
-	incoming_edges = (unsigned *)aligned_alloc(16, UNSIGNED_SIZE * (incoming_index[(max_nodes<<1)-2]  ));//add more 100.000 nodes
-	outgoing_edges = (unsigned *)aligned_alloc(16, UNSIGNED_SIZE * (outgoing_index[(max_nodes<<1)-2] ));//add more 100.000 nodes	
+	incoming_edges = (unsigned *)aligned_alloc(16, UNSIGNED_SIZE * (incoming_index[(max_nodes<<1)-2] + 4000000  ));//add more 100.000 nodes
+	outgoing_edges = (unsigned *)aligned_alloc(16, UNSIGNED_SIZE * (outgoing_index[(max_nodes<<1)-2]+ 4000000));//add more 100.000 nodes	
 	
 	//assign incomings/outgoings for each node
 	unsigned *ni = 	(unsigned *)aligned_alloc(16, UNSIGNED_SIZE * num_nodes);
@@ -180,7 +178,7 @@ void build_graph(unsigned max_nodes, unsigned max_edges)
 		outgoing_edges[ outgoing_index[u] + no[src[i]] ] = dst[i];
 		++no[src[i]];		
 	}
-	//free(ni); free(no); free(src); free(dst);
+	free(ni); free(no); free(src); free(dst);
 	//sort incomings/outgoings for each node
 	for (unsigned i = 0; i < num_nodes; i++) {
 		n = i<< 1;
@@ -198,7 +196,7 @@ void build_graph(unsigned max_nodes, unsigned max_edges)
 				outgoing_edges[n] = outgoing_edges[j];
 			}			
 		}
-		if ((max>0)&&(n < max-1 )) 	{//23/6
+		if (n < max-1 )	{
 			outgoing_index[i2+1] = n - outgoing_index[i2] + 1;
 		}
 		
@@ -209,7 +207,7 @@ void build_graph(unsigned max_nodes, unsigned max_edges)
 				incoming_edges[n] = incoming_edges[j];
 			}			
 		}
-		if ((max>0)&&(n < max-1 ))	{ //23/6 
+		if (n < max-1 )	{
 			incoming_index[i2+1] = n - incoming_index[i2]+1;
 		}
 	}
@@ -223,7 +221,13 @@ void build_graph(unsigned max_nodes, unsigned max_edges)
 	
 	unsigned long queuesize = (unsigned long) UNSIGNED_SIZE *max_nodes *num_threads;
 	gin_queue = (unsigned *)aligned_alloc(16,queuesize);
-	gout_queue = (unsigned *)aligned_alloc(16,queuesize);		
+	gout_queue = (unsigned *)aligned_alloc(16,queuesize);	
+
+	//statistics
+	fprintf(stderr, "Graph n=%u e=%u MI=%u MO=%u MS=%u GMS=%lu QS=%lu\n", num_nodes, num_edges,maxin, maxout, map_isize, MAP_BUFFER, queuesize);
+	//fprintf(stderr, "InOut1 %u ,In0 %u, In1 %u, Out0 %u, Out1 %u\n", num_inout1, num_in0, num_in1, num_out0, num_out1 );		
+	//fprintf(stderr, "end %u %u %u\n", incoming_index[num_nodes<<1],incoming_index[(num_nodes<<1)+1], incoming_index[(num_nodes<<1) +2] );
+	//exit(1);
 }
 
 //check if vertex is in the graph
@@ -254,120 +258,26 @@ static inline void add_edge(unsigned src, unsigned dst)
 	}
 	
 	//exec all query in queue
-	if (num_query > 0) exec_queries();  
+	if (num_query > 0) exec_queries(); 
 
-	unsigned  max =  outgoing_index[u] + outgoing_index[u1], size_forward, size_backward, index_forward, index_backward;
-	//prepare buffer for adding in outgoings array
-	if (max == outgoing_index[u+2]){	// reach the limit of pre-allocated buffer for this node
-		//find node having bucket to move into
-		//find the empty BUCKET foward
-		index_forward = ((src & BUCKET_DIV) + BUCKET_INDEX) << 1;//index of bucket	
-		size_forward = outgoing_index[index_forward] + outgoing_index[index_forward+1];
-
-		while (size_forward == outgoing_index[index_forward+2]){//if this node is full, try next
-			index_forward = index_forward + BUCKET_2INDEX;// next bucket node	
-			if (index_forward >= max_2nodes){
-				index_forward = max_2nodes - 2;
-				size_forward = outgoing_index[index_forward] + outgoing_index[index_forward+1];
-				break;
-			}			
-			size_forward = outgoing_index[index_forward] + outgoing_index[index_forward+1];
-		}
-		size_forward = size_forward - max;
-
-		//find the empty BUCKET backward
-		if (src > BUCKET_INDEX) {
-			index_backward = ((src & BUCKET_DIV)) << 1;//index of bucket
-			size_backward = outgoing_index[index_backward] + outgoing_index[index_backward+1];
-			while (size_backward == outgoing_index[index_backward+2]){//if this node is full, try next
-				if (index_backward < BUCKET_2INDEX){
-					index_backward = 0;
-					size_backward = outgoing_index[index_backward+2];
-					break;
-				} else {
-					index_backward = index_backward - BUCKET_2INDEX;// next bucket node	
-				}		
-				size_backward = outgoing_index[index_backward] + outgoing_index[index_backward+1];
-			}
-			size_backward = max - outgoing_index[index_backward+2];
-		} else {
-			index_backward = 0;
-		}
-		
-		if (index_backward ==0 || size_forward < size_backward) {
-			memmove(outgoing_edges + max + DISPLACEMENT, 
-						outgoing_edges + max, 
-							size_forward << 2);
-			for(unsigned i = (u+2); i<=index_forward; i+=2) 
-				outgoing_index[i] += DISPLACEMENT;		
-		} else {
-			memmove(outgoing_edges + outgoing_index[index_backward+2] - DISPLACEMENT, 
-						outgoing_edges + outgoing_index[index_backward+2], 
-							size_backward << 2);
-			for(unsigned i = (index_backward+2); i<=u; i+=2) 
-				outgoing_index[i] -= DISPLACEMENT;	
-		}		
-	}
-
-	//add new outgoing edge
-	outgoing_edges[outgoing_index[u] + outgoing_index[u1]] = dst;
+	//unsigned  max =  outgoing_index[u] + outgoing_index[u1];
+	unsigned num_index = outgoing_index[u1];
+	memcpy(outgoing_edges + outgoing_index[num_2nodes], 
+				outgoing_edges + outgoing_index[u],
+					(num_index<<2));
+	outgoing_index[u] = outgoing_index[num_2nodes];
+	outgoing_edges[outgoing_index[u] + num_index] = dst;
 	outgoing_index[u1] += 1;
+	outgoing_index[num_2nodes] = outgoing_index[u] + outgoing_index[u1];
 
-	//prepare buffer for adding in incomings array
-	max = incoming_index[v] + incoming_index[v1];
-	if (max == incoming_index[v + 2]){// reach the limit of pre-allocated buffer for this node
-		//find the empty BUCKET foward
-		index_forward = ((dst & BUCKET_DIV) + BUCKET_INDEX) << 1;//index of bucket	
-		size_forward = incoming_index[index_forward] + incoming_index[index_forward+1];
-
-		while (size_forward == incoming_index[index_forward+2]){//if this node is full, try next
-			index_forward = index_forward + BUCKET_2INDEX;// next bucket node	
-			if (index_forward >= max_2nodes){
-				index_forward = max_2nodes - 2;
-				size_forward = incoming_index[index_forward] + incoming_index[index_forward+1];
-				break;
-			}			
-			size_forward = incoming_index[index_forward] + incoming_index[index_forward+1];
-		}
-		size_forward = size_forward - max;
-
-		//find the empty BUCKET backward
-		if (dst > BUCKET_INDEX) {
-			index_backward = ((dst & BUCKET_DIV)) << 1;//index of bucket
-			size_backward = incoming_index[index_backward] + incoming_index[index_backward+1];
-			while (size_backward == incoming_index[index_backward+2]){//if this node is full, try next
-				if (index_backward < BUCKET_2INDEX){
-					index_backward = 0;
-					size_backward = incoming_index[index_backward+2];
-					break;
-				} else {
-					index_backward = index_backward - BUCKET_2INDEX;// next bucket node	
-				}		
-				size_backward = incoming_index[index_backward] + incoming_index[index_backward+1];
-			}
-			size_backward = max - incoming_index[index_backward+2];
-		} else {
-			index_backward = 0;
-		}
-		
-		if (index_backward ==0 || size_forward < size_backward) {
-			memmove(incoming_edges + max + DISPLACEMENT, 
-						incoming_edges + max, 
-							size_forward << 2);
-			for(unsigned i = (v +2); i<=index_forward; i+=2) 
-				incoming_index[i] += DISPLACEMENT;		
-		} else {
-			memmove(incoming_edges + incoming_index[index_backward+2] - DISPLACEMENT, 
-						incoming_edges + incoming_index[index_backward+2], 
-							size_backward << 2);
-			for(unsigned i = (index_backward+2); i<=v; i+=2) 
-				incoming_index[i] -= DISPLACEMENT;	
-		}	
-	}
-
-	//add new incoming edge
-	incoming_edges[incoming_index[v] + incoming_index[v1]] = src;
+	num_index = incoming_index[v1];
+	memcpy(incoming_edges + incoming_index[num_2nodes], 
+			incoming_edges + incoming_index[v],
+				(num_index << 2));
+	incoming_index[v] = incoming_index[num_2nodes];
+	incoming_edges[incoming_index[v] + num_index] = src;
 	incoming_index[v1] += 1;
+	incoming_index[num_2nodes] = incoming_index[v] + incoming_index[v1]; 
 }
 //remove an edge in the graph
 //__attribute__((vector))
@@ -394,7 +304,7 @@ static inline void del_edge(unsigned src, unsigned dst)
 		p = incoming_edges + incoming_index[v];
 		n = find_vertex(p, incoming_index[v1], src);
 		--incoming_index[v1];
-		size = (incoming_index[v1] - n); 
+		size = (incoming_index[v+1] - n); 
 		p = p+n;
 
 		for (unsigned i=0; i<size; i++) 
@@ -426,14 +336,13 @@ static inline void del_edge(unsigned src, unsigned dst)
 		//p[0:size] = p[1:size];
 	}
 }
-
 //do a exec_queries
 //__attribute__((vector))
 static inline void exec_queries()
 {	
 	cilk_for(unsigned i=0; i< num_query; i++){	
-		unsigned n = i<<1;
-		distances[i]  = shortest_distance(query_params[n],query_params[n+1]);			
+		long uv = vertices[query_index[i]];		
+		distances[i]  = shortest_distance((unsigned)(uv >> 32), (unsigned) uv);			
 	}
 	//write out results
 	for (unsigned i=0; i< num_query; i++) fprintf(stdout, "%d\n", distances[i]);
@@ -559,7 +468,7 @@ void free_buffer()
 	free(outgoing_index); free(outgoing_edges); 
 	free(incoming_index); free(incoming_edges);
 	free(gin_queue); free(gout_queue); 
-	free(actions); free(src); free(dst);
+	//free(actions); free(src); free(dst);
 	free(gmap);
 }
 
@@ -574,14 +483,19 @@ void usage() {
 
 static inline void run_batch() {
 	num_query = 0;
-	unsigned n;
+	//unsigned n,m;
+	long uv;
 	for (unsigned i = 0; i < num_actions; i++) {
+		//n = i<<1;
 		if(actions[i] == 'A'){
-			add_edge(src[i], dst[i]);	
+			uv= vertices[i];
+			add_edge( (unsigned) (uv >> 32), (unsigned) uv );	
 		}else if(actions[i] == 'D'){
-			del_edge(src[i], dst[i]); 	
-		}else if(actions[i] == 'Q'){			
-			n = num_query<<1;	query_params[n] = src[i]; query_params[n+1] = dst[i];
+			uv= vertices[i];
+			del_edge( (unsigned) (uv >> 32), (unsigned) uv);	
+		}else if(actions[i] == 'Q'){
+			//query_params[num_query] = vertices[i];
+			query_index[num_query] = i;
 			++num_query;
 		}
 	}
@@ -629,18 +543,18 @@ int main(int argc, char** argv) {
 	char *line = NULL;
 	size_t linesize=0;
 	int res;
-	//unsigned u, v, n;	
+	//unsigned n;
+	unsigned long u, v;	
 	//stdout buffer
 	char out_buff[100000];memset(out_buff, 0, 100000);
 	setvbuf(stdout, out_buff, _IOFBF, 100000);
-	actions = (char*)malloc(1000000);
-	src = (unsigned*)malloc(1000000);
-	dst = (unsigned*)malloc(1000000);
+	//actions = (char*)malloc(1000000);	src = (unsigned*)malloc(1000000);	dst = (unsigned*)malloc(1000000);
 	num_actions = 0;
 	num_query = 0;max_2nodes = max_nodes << 1;
 	FILE *fp = stdin;
 #ifdef EXEC_FILE	
 	fp = fopen("workload-file.txt", "r");	
+	//fp = fopen("workload-pokec.txt", "r");	
 #endif
 	fprintf(stdout,"R\n");	fflush(stdout);
 	while (1) {
@@ -657,13 +571,11 @@ int main(int argc, char** argv) {
 			fflush(stdout);
 			continue;
 		}	
-		if (line[0] == '#'){
-			continue;
-		}
-		res = sscanf(line, "%c %u %u", &actions[num_actions], &src[num_actions], &dst[num_actions]);
+		res = sscanf(line, "%c %lu %lu", &actions[num_actions], &u, &v);
+		vertices[num_actions] = (u << 32) | v; 
 		num_actions++;
 
 	}	//end of while
-	//free_buffer(); 
+	free_buffer(); 
 	return 0;
 }
